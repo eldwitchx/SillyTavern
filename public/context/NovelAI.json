@@ -1,6 +1,10 @@
 {
-    "name": "NovelAI",
     "story_string": "{{#if system}}{{system}}{{/if}}\n{{#if wiBefore}}{{wiBefore}}{{/if}}\n{{#if persona}}{{persona}}{{/if}}\n{{#if description}}{{description}}{{/if}}\n{{#if personality}}Personality: {{personality}}{{/if}}\n{{#if scenario}}Scenario: {{scenario}}{{/if}}\n{{#if wiAfter}}{{wiAfter}}{{/if}}",
+    "example_separator": "***",
     "chat_start": "***",
-    "example_separator": "***"
+    "always_force_name2": true,
+    "trim_sentences": true,
+    "include_newline": true,
+    "single_line": false,
+    "name": "NovelAI"
 }
