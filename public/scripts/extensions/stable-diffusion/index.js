@@ -12,13 +12,20 @@ import {
     getCurrentChatId,
     animation_duration,
     appendMediaToMessage,
-} from "../../../script.js";
-import { getApiUrl, getContext, extension_settings, doExtrasFetch, modules, renderExtensionTemplate } from "../../extensions.js";
-import { selected_group } from "../../group-chats.js";
-import { stringFormat, initScrollHeight, resetScrollHeight, getCharaFilename, saveBase64AsFile } from "../../utils.js";
-import { getMessageTimeStamp, humanizedDateTime } from "../../RossAscends-mods.js";
-import { SECRET_KEYS, secret_state } from "../../secrets.js";
-import { getNovelUnlimitedImageGeneration, getNovelAnlas, loadNovelSubscriptionData } from "../../nai-settings.js";
+    getUserAvatar,
+    user_avatar,
+    getCharacterAvatar,
+    formatCharacterAvatar,
+    substituteParams,
+} from '../../../script.js';
+import { getApiUrl, getContext, extension_settings, doExtrasFetch, modules, renderExtensionTemplate } from '../../extensions.js';
+import { selected_group } from '../../group-chats.js';
+import { stringFormat, initScrollHeight, resetScrollHeight, getCharaFilename, saveBase64AsFile, getBase64Async, delay } from '../../utils.js';
+import { getMessageTimeStamp, humanizedDateTime } from '../../RossAscends-mods.js';
+import { SECRET_KEYS, secret_state } from '../../secrets.js';
+import { getNovelUnlimitedImageGeneration, getNovelAnlas, loadNovelSubscriptionData } from '../../nai-settings.js';
+import { getMultimodalCaption } from '../shared.js';
+import { registerSlashCommand } from '../../slash-commands.js';
 export { MODULE_NAME };
 
 // Wraps a string into monospace font-face span
@@ -26,7 +33,7 @@ const m = x => `<span class="monospace">${x}</span>`;
 // Joins an array of strings with ' / '
 const j = a => a.join(' / ');
 // Wraps a string into paragraph block
-const p = a => `<p>${a}</p>`
+const p = a => `<p>${a}</p>`;
 
 const MODULE_NAME = 'sd';
 const UPDATE_INTERVAL = 1000;
@@ -38,7 +45,9 @@ const sources = {
     novel: 'novel',
     vlad: 'vlad',
     openai: 'openai',
-}
+    comfy: 'comfy',
+    togetherai: 'togetherai',
+};
 
 const generationMode = {
     CHARACTER: 0,
@@ -49,7 +58,16 @@ const generationMode = {
     FACE: 5,
     FREE: 6,
     BACKGROUND: 7,
-}
+    CHARACTER_MULTIMODAL: 8,
+    USER_MULTIMODAL: 9,
+    FACE_MULTIMODAL: 10,
+};
+
+const multimodalMap = {
+    [generationMode.CHARACTER]: generationMode.CHARACTER_MULTIMODAL,
+    [generationMode.USER]: generationMode.USER_MULTIMODAL,
+    [generationMode.FACE]: generationMode.FACE_MULTIMODAL,
+};
 
 const modeLabels = {
     [generationMode.CHARACTER]: 'Character ("Yourself")',
@@ -59,7 +77,10 @@ const modeLabels = {
     [generationMode.NOW]: 'Last Message',
     [generationMode.RAW_LAST]: 'Raw Last Message',
     [generationMode.BACKGROUND]: 'Background',
-}
+    [generationMode.CHARACTER_MULTIMODAL]: 'Character (Multimodal Mode)',
+    [generationMode.FACE_MULTIMODAL]: 'Portrait (Multimodal Mode)',
+    [generationMode.USER_MULTIMODAL]: 'User (Multimodal Mode)',
+};
 
 const triggerWords = {
     [generationMode.CHARACTER]: ['you'],
@@ -69,7 +90,7 @@ const triggerWords = {
     [generationMode.NOW]: ['last'],
     [generationMode.FACE]: ['face'],
     [generationMode.BACKGROUND]: ['background'],
-}
+};
 
 const messageTrigger = {
     activationRegex: /\b(send|mail|imagine|generate|make|create|draw|paint|render)\b.*\b(pic|picture|image|drawing|painting|photo|photograph)\b(?:\s+of)?(?:\s+(?:a|an|the|this|that|those)?)?(.+)/i,
@@ -81,16 +102,16 @@ const messageTrigger = {
         [generationMode.FACE]: ['your face', 'your portrait', 'your selfie'],
         [generationMode.BACKGROUND]: ['background', 'scene background', 'scene', 'scenery', 'surroundings', 'environment'],
     },
-}
+};
 
 const promptTemplates = {
     /*OLD:     [generationMode.CHARACTER]: "Pause your roleplay and provide comma-delimited list of phrases and keywords which describe {{char}}'s physical appearance and clothing. Ignore {{char}}'s personality traits, and chat history when crafting this description. End your response once the comma-delimited list is complete. Do not roleplay when writing this description, and do not attempt to continue the story.", */
-    [generationMode.CHARACTER]: "[In the next response I want you to provide only a detailed comma-delimited list of keywords and phrases which describe {{char}}. The list must include all of the following items in this order: name, species and race, gender, age, clothing, occupation, physical features and appearances. Do not include descriptions of non-visual qualities such as personality, movements, scents, mental traits, or anything which could not be seen in a still photograph. Do not write in full sentences. Prefix your description with the phrase 'full body portrait,']",
+    [generationMode.CHARACTER]: '[In the next response I want you to provide only a detailed comma-delimited list of keywords and phrases which describe {{char}}. The list must include all of the following items in this order: name, species and race, gender, age, clothing, occupation, physical features and appearances. Do not include descriptions of non-visual qualities such as personality, movements, scents, mental traits, or anything which could not be seen in a still photograph. Do not write in full sentences. Prefix your description with the phrase \'full body portrait,\']',
     //face-specific prompt
-    [generationMode.FACE]: "[In the next response I want you to provide only a detailed comma-delimited list of keywords and phrases which describe {{char}}. The list must include all of the following items in this order: name, species and race, gender, age, facial features and expressions, occupation, hair and hair accessories (if any), what they are wearing on their upper body (if anything). Do not describe anything below their neck. Do not include descriptions of non-visual qualities such as personality, movements, scents, mental traits, or anything which could not be seen in a still photograph. Do not write in full sentences. Prefix your description with the phrase 'close up facial portrait,']",
+    [generationMode.FACE]: '[In the next response I want you to provide only a detailed comma-delimited list of keywords and phrases which describe {{char}}. The list must include all of the following items in this order: name, species and race, gender, age, facial features and expressions, occupation, hair and hair accessories (if any), what they are wearing on their upper body (if anything). Do not describe anything below their neck. Do not include descriptions of non-visual qualities such as personality, movements, scents, mental traits, or anything which could not be seen in a still photograph. Do not write in full sentences. Prefix your description with the phrase \'close up facial portrait,\']',
     //prompt for only the last message
-    [generationMode.USER]: "[Pause your roleplay and provide a detailed description of {{user}}'s physical appearance from the perspective of {{char}} in the form of a comma-delimited list of keywords and phrases. The list must include all of the following items in this order: name, species and race, gender, age, clothing, occupation, physical features and appearances. Do not include descriptions of non-visual qualities such as personality, movements, scents, mental traits, or anything which could not be seen in a still photograph. Do not write in full sentences. Prefix your description with the phrase 'full body portrait,'. Ignore the rest of the story when crafting this description. Do not roleplay as {{char}} when writing this description, and do not attempt to continue the story.]",
-    [generationMode.SCENARIO]: "[Pause your roleplay and provide a detailed description for all of the following: a brief recap of recent events in the story, {{char}}'s appearance, and {{char}}'s surroundings. Do not roleplay while writing this description.]",
+    [generationMode.USER]: '[Pause your roleplay and provide a detailed description of {{user}}\'s physical appearance from the perspective of {{char}} in the form of a comma-delimited list of keywords and phrases. The list must include all of the following items in this order: name, species and race, gender, age, clothing, occupation, physical features and appearances. Do not include descriptions of non-visual qualities such as personality, movements, scents, mental traits, or anything which could not be seen in a still photograph. Do not write in full sentences. Prefix your description with the phrase \'full body portrait,\'. Ignore the rest of the story when crafting this description. Do not roleplay as {{char}} when writing this description, and do not attempt to continue the story.]',
+    [generationMode.SCENARIO]: '[Pause your roleplay and provide a detailed description for all of the following: a brief recap of recent events in the story, {{char}}\'s appearance, and {{char}}\'s surroundings. Do not roleplay while writing this description.]',
 
     [generationMode.NOW]: `[Pause your roleplay. Your next response must be formatted as a single comma-delimited list of concise keywords.  The list will describe of the visual details included in the last chat message.
 
@@ -116,13 +137,16 @@ const promptTemplates = {
     A correctly formatted example response would be:
     '(location),(character list by gender),(primary action), (relative character position) POV, (character 1's description and actions), (character 2's description and actions)']`,
 
-    [generationMode.RAW_LAST]: "[Pause your roleplay and provide ONLY the last chat message string back to me verbatim. Do not write anything after the string. Do not roleplay at all in your response. Do not continue the roleplay story.]",
-    [generationMode.BACKGROUND]: "[Pause your roleplay and provide a detailed description of {{char}}'s surroundings in the form of a comma-delimited list of keywords and phrases. The list must include all of the following items in this order: location, time of day, weather, lighting, and any other relevant details. Do not include descriptions of characters and non-visual qualities such as names, personality, movements, scents, mental traits, or anything which could not be seen in a still photograph. Do not write in full sentences. Prefix your description with the phrase 'background,'. Ignore the rest of the story when crafting this description. Do not roleplay as {{user}} when writing this description, and do not attempt to continue the story.]",
-}
+    [generationMode.RAW_LAST]: '[Pause your roleplay and provide ONLY the last chat message string back to me verbatim. Do not write anything after the string. Do not roleplay at all in your response. Do not continue the roleplay story.]',
+    [generationMode.BACKGROUND]: '[Pause your roleplay and provide a detailed description of {{char}}\'s surroundings in the form of a comma-delimited list of keywords and phrases. The list must include all of the following items in this order: location, time of day, weather, lighting, and any other relevant details. Do not include descriptions of characters and non-visual qualities such as names, personality, movements, scents, mental traits, or anything which could not be seen in a still photograph. Do not write in full sentences. Prefix your description with the phrase \'background,\'. Ignore the rest of the story when crafting this description. Do not roleplay as {{user}} when writing this description, and do not attempt to continue the story.]',
+    [generationMode.FACE_MULTIMODAL]: 'Provide an exhaustive comma-separated list of tags describing the appearance of the character on this image in great detail. Start with "close-up portrait".',
+    [generationMode.CHARACTER_MULTIMODAL]: 'Provide an exhaustive comma-separated list of tags describing the appearance of the character on this image in great detail. Start with "full body portrait".',
+    [generationMode.USER_MULTIMODAL]: 'Provide an exhaustive comma-separated list of tags describing the appearance of the character on this image in great detail. Start with "full body portrait".',
+};
 
 const helpString = [
     `${m('(argument)')} – requests to generate an image. Supported arguments: ${m(j(Object.values(triggerWords).flat()))}.`,
-    `Anything else would trigger a "free mode" to make generate whatever you prompted. Example: '/imagine apple tree' would generate a picture of an apple tree.`,
+    'Anything else would trigger a "free mode" to make generate whatever you prompted. Example: \'/imagine apple tree\' would generate a picture of an apple tree.',
 ].join(' ');
 
 const defaultPrefix = 'best quality, absurdres, aesthetic,';
@@ -151,6 +175,9 @@ const defaultSettings = {
     steps_step: 1,
     steps: 20,
 
+    // Scheduler
+    scheduler: 'normal',
+
     // Image dimensions (Width & Height)
     dimension_min: 64,
     dimension_max: 2048,
@@ -162,6 +189,7 @@ const defaultSettings = {
     negative_prompt: defaultNegative,
     sampler: 'DDIM',
     model: '',
+    vae: '',
 
     // Automatic1111/Horde exclusives
     restore_faces: false,
@@ -177,6 +205,7 @@ const defaultSettings = {
     refine_mode: false,
     expand: false,
     interactive_mode: false,
+    multimodal_captioning: false,
 
     prompts: promptTemplates,
 
@@ -214,7 +243,11 @@ const defaultSettings = {
 
     style: 'Default',
     styles: defaultStyles,
-}
+
+    // ComyUI settings
+    comfy_url: 'http://127.0.0.1:8188',
+    comfy_workflow: 'Default_Comfy_Workflow.json',
+};
 
 function processTriggers(chat, _, abort) {
     if (!extension_settings.sd.interactive_mode) {
@@ -318,6 +351,10 @@ async function loadSettings() {
         extension_settings.sd.character_prompts = {};
     }
 
+    if (extension_settings.sd.character_negative_prompts === undefined) {
+        extension_settings.sd.character_negative_prompts = {};
+    }
+
     if (!Array.isArray(extension_settings.sd.styles)) {
         extension_settings.sd.styles = defaultStyles;
     }
@@ -342,6 +379,7 @@ async function loadSettings() {
     $('#sd_enable_hr').prop('checked', extension_settings.sd.enable_hr);
     $('#sd_refine_mode').prop('checked', extension_settings.sd.refine_mode);
     $('#sd_expand').prop('checked', extension_settings.sd.expand);
+    $('#sd_multimodal_captioning').prop('checked', extension_settings.sd.multimodal_captioning);
     $('#sd_auto_url').val(extension_settings.sd.auto_url);
     $('#sd_auto_auth').val(extension_settings.sd.auto_auth);
     $('#sd_vlad_url').val(extension_settings.sd.vlad_url);
@@ -349,6 +387,8 @@ async function loadSettings() {
     $('#sd_interactive_mode').prop('checked', extension_settings.sd.interactive_mode);
     $('#sd_openai_style').val(extension_settings.sd.openai_style);
     $('#sd_openai_quality').val(extension_settings.sd.openai_quality);
+    $('#sd_comfy_url').val(extension_settings.sd.comfy_url);
+    $('#sd_comfy_prompt').val(extension_settings.sd.comfy_prompt);
 
     for (const style of extension_settings.sd.styles) {
         const option = document.createElement('option');
@@ -358,10 +398,39 @@ async function loadSettings() {
         $('#sd_style').append(option);
     }
 
+    // Find a closest resolution option match for the current width and height
+    let resolutionId = null, minAspectDiff = Infinity, minResolutionDiff = Infinity;
+    for (const [id, resolution] of Object.entries(resolutionOptions)) {
+        const aspectDiff = Math.abs((resolution.width / resolution.height) - (extension_settings.sd.width / extension_settings.sd.height));
+        const resolutionDiff = Math.abs(resolution.width * resolution.height - extension_settings.sd.width * extension_settings.sd.height);
+
+        if (resolutionDiff < minResolutionDiff || (resolutionDiff === minResolutionDiff && aspectDiff < minAspectDiff)) {
+            resolutionId = id;
+            minAspectDiff = aspectDiff;
+            minResolutionDiff = resolutionDiff;
+        }
+
+        if (resolutionDiff === 0 && aspectDiff === 0) {
+            break;
+        }
+    }
+
+    $('#sd_resolution').val(resolutionId);
+
     toggleSourceControls();
     addPromptTemplates();
 
-    await Promise.all([loadSamplers(), loadModels()]);
+    await loadSettingOptions();
+}
+
+async function loadSettingOptions() {
+    return Promise.all([
+        loadSamplers(),
+        loadModels(),
+        loadSchedulers(),
+        loadVaes(),
+        loadComfyWorkflows(),
+    ]);
 }
 
 function addPromptTemplates() {
@@ -390,7 +459,7 @@ function addPromptTemplates() {
         const container = $('<div></div>')
             .addClass('title_restorable')
             .append(label)
-            .append(button)
+            .append(button);
         $('#sd_prompt_templates').append(container);
         $('#sd_prompt_templates').append(textarea);
     }
@@ -398,6 +467,11 @@ function addPromptTemplates() {
 
 function onInteractiveModeInput() {
     extension_settings.sd.interactive_mode = !!$(this).prop('checked');
+    saveSettingsDebounced();
+}
+
+function onMultimodalCaptioningInput() {
+    extension_settings.sd.multimodal_captioning = !!$(this).prop('checked');
     saveSettingsDebounced();
 }
 
@@ -505,11 +579,19 @@ function onChatChanged() {
     $('#sd_character_prompt_block').show();
     const key = getCharaFilename(this_chid);
     $('#sd_character_prompt').val(key ? (extension_settings.sd.character_prompts[key] || '') : '');
+    $('#sd_character_negative_prompt').val(key ? (extension_settings.sd.character_negative_prompts[key] || '') : '');
 }
 
 function onCharacterPromptInput() {
     const key = getCharaFilename(this_chid);
     extension_settings.sd.character_prompts[key] = $('#sd_character_prompt').val();
+    resetScrollHeight($(this));
+    saveSettingsDebounced();
+}
+
+function onCharacterNegativePromptInput() {
+    const key = getCharaFilename(this_chid);
+    extension_settings.sd.character_negative_prompts[key] = $('#sd_character_negative_prompt').val();
     resetScrollHeight($(this));
     saveSettingsDebounced();
 }
@@ -528,6 +610,20 @@ function getCharacterPrefix() {
     return '';
 }
 
+function getCharacterNegativePrefix() {
+    if (!this_chid || selected_group) {
+        return '';
+    }
+
+    const key = getCharaFilename(this_chid);
+
+    if (key) {
+        return extension_settings.sd.character_negative_prompts[key] || '';
+    }
+
+    return '';
+}
+
 /**
  * Combines two prompt prefixes into one.
  * @param {string} str1 Base string
@@ -536,17 +632,19 @@ function getCharacterPrefix() {
  * @returns {string} Combined string with a comma between them
  */
 function combinePrefixes(str1, str2, macro = '') {
+    // Remove leading/trailing white spaces and commas from the strings
+    const process = (s) => s.trim().replace(/^,|,$/g, '').trim();
+
     if (!str2) {
         return str1;
     }
 
-    // Remove leading/trailing white spaces and commas from the strings
-    str1 = str1.trim().replace(/^,|,$/g, '');
-    str2 = str2.trim().replace(/^,|,$/g, '');
+    str1 = process(str1);
+    str2 = process(str2);
 
     // Combine the strings with a comma between them)
     const result = macro && str1.includes(macro) ? str1.replace(macro, str2) : `${str1}, ${str2},`;
-    return result;
+    return process(result);
 }
 
 function onExpandInput() {
@@ -588,6 +686,46 @@ function onSamplerChange() {
     saveSettingsDebounced();
 }
 
+const resolutionOptions = {
+    sd_res_512x512: { width: 512, height: 512, name: '512x512 (1:1, icons, profile pictures)' },
+    sd_res_600x600: { width: 600, height: 600, name: '600x600 (1:1, icons, profile pictures)' },
+    sd_res_512x768: { width: 512, height: 768, name: '512x768 (2:3, vertical character card)' },
+    sd_res_768x512: { width: 768, height: 512, name: '768x512 (3:2, horizontal 35-mm movie film)' },
+    sd_res_960x540: { width: 960, height: 540, name: '960x540 (16:9, horizontal wallpaper)' },
+    sd_res_540x960: { width: 540, height: 960, name: '540x960 (9:16, vertical wallpaper)' },
+    sd_res_1920x1088: { width: 1920, height: 1088, name: '1920x1088 (16:9, 1080p, horizontal wallpaper)' },
+    sd_res_1088x1920: { width: 1088, height: 1920, name: '1088x1920 (9:16, 1080p, vertical wallpaper)' },
+    sd_res_1280x720: { width: 1280, height: 720, name: '1280x720 (16:9, 720p, horizontal wallpaper)' },
+    sd_res_720x1280: { width: 720, height: 1280, name: '720x1280 (9:16, 720p, vertical wallpaper)' },
+    sd_res_1024x1024: { width: 1024, height: 1024, name: '1024x1024 (1:1, SDXL)' },
+    sd_res_1152x896: { width: 1152, height: 896, name: '1152x896 (9:7, SDXL)' },
+    sd_res_896x1152: { width: 896, height: 1152, name: '896x1152 (7:9, SDXL)' },
+    sd_res_1216x832: { width: 1216, height: 832, name: '1216x832 (19:13, SDXL)' },
+    sd_res_832x1216: { width: 832, height: 1216, name: '832x1216 (13:19, SDXL)' },
+    sd_res_1344x768: { width: 1344, height: 768, name: '1344x768 (4:3, SDXL)' },
+    sd_res_768x1344: { width: 768, height: 1344, name: '768x1344 (3:4, SDXL)' },
+    sd_res_1536x640: { width: 1536, height: 640, name: '1536x640 (24:10, SDXL)' },
+    sd_res_640x1536: { width: 640, height: 1536, name: '640x1536 (10:24, SDXL)' },
+};
+
+function onResolutionChange() {
+    const selectedOption = $('#sd_resolution').val();
+    const selectedResolution = resolutionOptions[selectedOption];
+
+    if (!selectedResolution) {
+        console.warn(`Could not find resolution option for ${selectedOption}`);
+        return;
+    }
+
+    $('#sd_height').val(selectedResolution.height).trigger('input');
+    $('#sd_width').val(selectedResolution.width).trigger('input');
+}
+
+function onSchedulerChange() {
+    extension_settings.sd.scheduler = $('#sd_scheduler').find(':selected').val();
+    saveSettingsDebounced();
+}
+
 function onWidthInput() {
     extension_settings.sd.width = Number($('#sd_width').val());
     $('#sd_width_value').text(extension_settings.sd.width);
@@ -606,7 +744,7 @@ async function onSourceChange() {
     extension_settings.sd.sampler = null;
     toggleSourceControls();
     saveSettingsDebounced();
-    await Promise.all([loadModels(), loadSamplers()]);
+    await loadSettingOptions();
 }
 
 async function onOpenAiStyleSelect() {
@@ -712,6 +850,26 @@ function onHrSecondPassStepsInput() {
     saveSettingsDebounced();
 }
 
+function onComfyUrlInput() {
+    extension_settings.sd.comfy_url = $('#sd_comfy_url').val();
+    saveSettingsDebounced();
+}
+
+function onComfyWorkflowChange() {
+    extension_settings.sd.comfy_workflow = $('#sd_comfy_workflow').find(':selected').val();
+    saveSettingsDebounced();
+}
+async function changeComfyWorkflow(_, name) {
+    name = name.replace(/(\.json)?$/i, '.json');
+    if ($(`#sd_comfy_workflow > [value="${name}"]`).length > 0) {
+        extension_settings.sd.comfy_workflow = name;
+        $('#sd_comfy_workflow').val(extension_settings.sd.comfy_workflow);
+        saveSettingsDebounced();
+    } else {
+        toastr.error(`ComfyUI Workflow "${name}" does not exist.`);
+    }
+}
+
 async function validateAutoUrl() {
     try {
         if (!extension_settings.sd.auto_url) {
@@ -728,8 +886,7 @@ async function validateAutoUrl() {
             throw new Error('SD WebUI returned an error.');
         }
 
-        await loadSamplers();
-        await loadModels();
+        await loadSettingOptions();
         toastr.success('SD WebUI API connected.');
     } catch (error) {
         toastr.error(`Could not validate SD WebUI API: ${error.message}`);
@@ -752,11 +909,34 @@ async function validateVladUrl() {
             throw new Error('SD.Next returned an error.');
         }
 
-        await loadSamplers();
-        await loadModels();
+        await loadSettingOptions();
         toastr.success('SD.Next API connected.');
     } catch (error) {
         toastr.error(`Could not validate SD.Next API: ${error.message}`);
+    }
+}
+
+async function validateComfyUrl() {
+    try {
+        if (!extension_settings.sd.comfy_url) {
+            throw new Error('URL is not set.');
+        }
+
+        const result = await fetch('/api/sd/comfy/ping', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                url: extension_settings.sd.comfy_url,
+            }),
+        });
+        if (!result.ok) {
+            throw new Error('ComfyUI returned an error.');
+        }
+
+        await loadSettingOptions();
+        toastr.success('ComfyUI API connected.');
+    } catch (error) {
+        toastr.error(`Could not validate ComfyUI API: ${error.message}`);
     }
 }
 
@@ -764,7 +944,7 @@ async function onModelChange() {
     extension_settings.sd.model = $('#sd_model').find(':selected').val();
     saveSettingsDebounced();
 
-    const cloudSources = [sources.horde, sources.novel, sources.openai];
+    const cloudSources = [sources.horde, sources.novel, sources.openai, sources.togetherai];
 
     if (cloudSources.includes(extension_settings.sd.source)) {
         return;
@@ -800,6 +980,10 @@ async function getAutoRemoteModel() {
     }
 }
 
+async function onVaeChange() {
+    extension_settings.sd.vae = $('#sd_vae').find(':selected').val();
+}
+
 async function getAutoRemoteUpscalers() {
     try {
         const result = await fetch('/api/sd/upscalers', {
@@ -822,7 +1006,7 @@ async function getAutoRemoteUpscalers() {
 
 async function getVladRemoteUpscalers() {
     try {
-        const result = await fetch('/api/sd-next/upscalers', {
+        const result = await fetch('/api/sd/sd-next/upscalers', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify(getSdRequestBody()),
@@ -893,7 +1077,13 @@ async function loadSamplers() {
             samplers = await loadVladSamplers();
             break;
         case sources.openai:
-            samplers = await loadOpenAiSamplers();
+            samplers = ['N/A'];
+            break;
+        case sources.comfy:
+            samplers = await loadComfySamplers();
+            break;
+        case sources.togetherai:
+            samplers = ['N/A'];
             break;
     }
 
@@ -903,6 +1093,11 @@ async function loadSamplers() {
         option.value = sampler;
         option.selected = sampler === extension_settings.sd.sampler;
         $('#sd_sampler').append(option);
+    }
+
+    if (!extension_settings.sd.sampler && samplers.length > 0) {
+        extension_settings.sd.sampler = samplers[0];
+        $('#sd_sampler').val(extension_settings.sd.sampler).trigger('change');
     }
 }
 
@@ -960,10 +1155,6 @@ async function loadAutoSamplers() {
     }
 }
 
-async function loadOpenAiSamplers() {
-    return ['N/A'];
-}
-
 async function loadVladSamplers() {
     if (!extension_settings.sd.vlad_url) {
         return [];
@@ -1004,6 +1195,28 @@ async function loadNovelSamplers() {
     ];
 }
 
+async function loadComfySamplers() {
+    if (!extension_settings.sd.comfy_url) {
+        return [];
+    }
+
+    try {
+        const result = await fetch('/api/sd/comfy/samplers', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                url: extension_settings.sd.comfy_url,
+            }),
+        });
+        if (!result.ok) {
+            throw new Error('ComfyUI returned an error.');
+        }
+        return await result.json();
+    } catch (error) {
+        return [];
+    }
+}
+
 async function loadModels() {
     $('#sd_model').empty();
     let models = [];
@@ -1027,6 +1240,12 @@ async function loadModels() {
         case sources.openai:
             models = await loadOpenAiModels();
             break;
+        case sources.comfy:
+            models = await loadComfyModels();
+            break;
+        case sources.togetherai:
+            models = await loadTogetherAIModels();
+            break;
     }
 
     for (const model of models) {
@@ -1036,6 +1255,30 @@ async function loadModels() {
         option.selected = model.value === extension_settings.sd.model;
         $('#sd_model').append(option);
     }
+
+    if (!extension_settings.sd.model && models.length > 0) {
+        extension_settings.sd.model = models[0].value;
+        $('#sd_model').val(extension_settings.sd.model).trigger('change');
+    }
+}
+
+async function loadTogetherAIModels() {
+    if (!secret_state[SECRET_KEYS.TOGETHERAI]) {
+        console.debug('TogetherAI API key is not set.');
+        return [];
+    }
+
+    const result = await fetch('/api/sd/together/models', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+    });
+
+    if (result.ok) {
+        const data = await result.json();
+        return data;
+    }
+
+    return [];
 }
 
 async function loadHordeModels() {
@@ -1126,8 +1369,8 @@ async function loadAutoModels() {
 
 async function loadOpenAiModels() {
     return [
-        { value: 'dall-e-2', text: 'DALL-E 2' },
         { value: 'dall-e-3', text: 'DALL-E 3' },
+        { value: 'dall-e-2', text: 'DALL-E 2' },
     ];
 }
 
@@ -1204,16 +1447,199 @@ async function loadNovelModels() {
     ];
 }
 
+async function loadComfyModels() {
+    if (!extension_settings.sd.comfy_url) {
+        return [];
+    }
+
+    try {
+        const result = await fetch('/api/sd/comfy/models', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                url: extension_settings.sd.comfy_url,
+            }),
+        });
+        if (!result.ok) {
+            throw new Error('ComfyUI returned an error.');
+        }
+        return await result.json();
+    } catch (error) {
+        return [];
+    }
+}
+
+async function loadSchedulers() {
+    $('#sd_scheduler').empty();
+    let schedulers = [];
+
+    switch (extension_settings.sd.source) {
+        case sources.extras:
+            schedulers = ['N/A'];
+            break;
+        case sources.horde:
+            schedulers = ['N/A'];
+            break;
+        case sources.auto:
+            schedulers = ['N/A'];
+            break;
+        case sources.novel:
+            schedulers = ['N/A'];
+            break;
+        case sources.vlad:
+            schedulers = ['N/A'];
+            break;
+        case sources.openai:
+            schedulers = ['N/A'];
+            break;
+        case sources.togetherai:
+            schedulers = ['N/A'];
+            break;
+        case sources.comfy:
+            schedulers = await loadComfySchedulers();
+            break;
+    }
+
+    for (const scheduler of schedulers) {
+        const option = document.createElement('option');
+        option.innerText = scheduler;
+        option.value = scheduler;
+        option.selected = scheduler === extension_settings.sd.scheduler;
+        $('#sd_scheduler').append(option);
+    }
+}
+
+async function loadComfySchedulers() {
+    if (!extension_settings.sd.comfy_url) {
+        return [];
+    }
+
+    try {
+        const result = await fetch('/api/sd/comfy/schedulers', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                url: extension_settings.sd.comfy_url,
+            }),
+        });
+        if (!result.ok) {
+            throw new Error('ComfyUI returned an error.');
+        }
+        return await result.json();
+    } catch (error) {
+        return [];
+    }
+}
+
+async function loadVaes() {
+    $('#sd_vae').empty();
+    let vaes = [];
+
+    switch (extension_settings.sd.source) {
+        case sources.extras:
+            vaes = ['N/A'];
+            break;
+        case sources.horde:
+            vaes = ['N/A'];
+            break;
+        case sources.auto:
+            vaes = ['N/A'];
+            break;
+        case sources.novel:
+            vaes = ['N/A'];
+            break;
+        case sources.vlad:
+            vaes = ['N/A'];
+            break;
+        case sources.openai:
+            vaes = ['N/A'];
+            break;
+        case sources.togetherai:
+            vaes = ['N/A'];
+            break;
+        case sources.comfy:
+            vaes = await loadComfyVaes();
+            break;
+    }
+
+    for (const vae of vaes) {
+        const option = document.createElement('option');
+        option.innerText = vae;
+        option.value = vae;
+        option.selected = vae === extension_settings.sd.vae;
+        $('#sd_vae').append(option);
+    }
+}
+
+async function loadComfyVaes() {
+    if (!extension_settings.sd.comfy_url) {
+        return [];
+    }
+
+    try {
+        const result = await fetch('/api/sd/comfy/vaes', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                url: extension_settings.sd.comfy_url,
+            }),
+        });
+        if (!result.ok) {
+            throw new Error('ComfyUI returned an error.');
+        }
+        return await result.json();
+    } catch (error) {
+        return [];
+    }
+}
+
+async function loadComfyWorkflows() {
+    if (!extension_settings.sd.comfy_url) {
+        return;
+    }
+
+    try {
+        $('#sd_comfy_workflow').empty();
+        const result = await fetch('/api/sd/comfy/workflows', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                url: extension_settings.sd.comfy_url,
+            }),
+        });
+        if (!result.ok) {
+            throw new Error('ComfyUI returned an error.');
+        }
+        const workflows = await result.json();
+        for (const workflow of workflows) {
+            const option = document.createElement('option');
+            option.innerText = workflow;
+            option.value = workflow;
+            option.selected = workflow === extension_settings.sd.comfy_workflow;
+            $('#sd_comfy_workflow').append(option);
+        }
+    } catch (error) {
+        return;
+    }
+}
+
 function getGenerationType(prompt) {
+    let mode = generationMode.FREE;
+
     for (const [key, values] of Object.entries(triggerWords)) {
         for (const value of values) {
             if (value.toLowerCase() === prompt.toLowerCase().trim()) {
-                return Number(key);
+                mode = Number(key);
+                break;
             }
         }
     }
 
-    return generationMode.FREE;
+    if (extension_settings.sd.multimodal_captioning && multimodalMap[mode] !== undefined) {
+        mode = multimodalMap[mode];
+    }
+
+    return mode;
 }
 
 function getQuietPrompt(mode, trigger) {
@@ -1229,11 +1655,11 @@ function processReply(str) {
         return '';
     }
 
-    str = str.replaceAll('"', '')
-    str = str.replaceAll('“', '')
-    str = str.replaceAll('.', ',')
-    str = str.replaceAll('\n', ', ')
-    str = str.replace(/[^a-zA-Z0-9,:()]+/g, ' ') // Replace everything except alphanumeric characters and commas with spaces
+    str = str.replaceAll('"', '');
+    str = str.replaceAll('“', '');
+    str = str.replaceAll('.', ',');
+    str = str.replaceAll('\n', ', ');
+    str = str.replace(/[^a-zA-Z0-9,:()]+/g, ' '); // Replace everything except alphanumeric characters and commas with spaces
     str = str.replace(/\s+/g, ' '); // Collapse multiple whitespaces into one
     str = str.trim();
 
@@ -1258,13 +1684,13 @@ function getRawLastMessage() {
 
         toastr.warning('No usable messages found.', 'Image Generation');
         throw new Error('No usable messages found.');
-    }
+    };
 
     const context = getContext();
     const lastMessage = getLastUsableMessage(),
         characterDescription = context.characters[context.characterId].description,
         situation = context.characters[context.characterId].scenario;
-    return `((${processReply(lastMessage)})), (${processReply(situation)}:0.7), (${processReply(characterDescription)}:0.5)`
+    return `((${processReply(lastMessage)})), (${processReply(situation)}:0.7), (${processReply(characterDescription)}:0.5)`;
 }
 
 async function generatePicture(_, trigger, message, callback) {
@@ -1274,7 +1700,7 @@ async function generatePicture(_, trigger, message, callback) {
     }
 
     if (!isValidState()) {
-        toastr.warning("Extensions API is not connected or doesn't provide SD module. Enable Stable Horde to generate images.");
+        toastr.warning('Extensions API is not connected or doesn\'t provide SD module. Enable Stable Horde to generate images.');
         return;
     }
 
@@ -1284,7 +1710,7 @@ async function generatePicture(_, trigger, message, callback) {
     trigger = trigger.trim();
     const generationType = getGenerationType(trigger);
     console.log('Generation mode', generationType, 'triggered with', trigger);
-    const quiet_prompt = getQuietPrompt(generationType, trigger);
+    const quietPrompt = getQuietPrompt(generationType, trigger);
     const context = getContext();
 
     // if context.characterId is not null, then we get context.characters[context.characterId].avatar, else we get groupId and context.groups[groupId].id
@@ -1302,13 +1728,13 @@ async function generatePicture(_, trigger, message, callback) {
             } else {
                 sendMessage(prompt, imagePath, generationType);
             }
-        }
+        };
     }
 
     const dimensions = setTypeSpecificDimensions(generationType);
 
     try {
-        const prompt = await getPrompt(generationType, message, trigger, quiet_prompt);
+        const prompt = await getPrompt(generationType, message, trigger, quietPrompt);
         console.log('Processed image prompt:', prompt);
 
         context.deactivateSendButtons();
@@ -1317,7 +1743,7 @@ async function generatePicture(_, trigger, message, callback) {
         await sendGenerationRequest(generationType, prompt, characterName, callback);
     } catch (err) {
         console.trace(err);
-        throw new Error('SD prompt text generation failed.')
+        throw new Error('SD prompt text generation failed.');
     }
     finally {
         restoreOriginalDimensions(dimensions);
@@ -1353,7 +1779,7 @@ function restoreOriginalDimensions(savedParams) {
     extension_settings.sd.width = savedParams.width;
 }
 
-async function getPrompt(generationType, message, trigger, quiet_prompt) {
+async function getPrompt(generationType, message, trigger, quietPrompt) {
     let prompt;
 
     switch (generationType) {
@@ -1361,10 +1787,15 @@ async function getPrompt(generationType, message, trigger, quiet_prompt) {
             prompt = message || getRawLastMessage();
             break;
         case generationMode.FREE:
-            prompt = trigger.trim();
+            prompt = generateFreeModePrompt(trigger.trim());
+            break;
+        case generationMode.FACE_MULTIMODAL:
+        case generationMode.CHARACTER_MULTIMODAL:
+        case generationMode.USER_MULTIMODAL:
+            prompt = await generateMultimodalPrompt(generationType, quietPrompt);
             break;
         default:
-            prompt = await generatePrompt(quiet_prompt);
+            prompt = await generatePrompt(quietPrompt);
             break;
     }
 
@@ -1375,17 +1806,114 @@ async function getPrompt(generationType, message, trigger, quiet_prompt) {
     return prompt;
 }
 
-async function generatePrompt(quiet_prompt) {
-    const reply = await generateQuietPrompt(quiet_prompt, false, false);
-    return processReply(reply);
+/**
+ * Generates a free prompt with a character-specific prompt prefix support.
+ * @param {string} trigger - The prompt to use for the image generation.
+ * @returns {string}
+ */
+function generateFreeModePrompt(trigger) {
+    return trigger
+        .replace(/(?:^char(\s|,)|\{\{charPrefix\}\})/gi, (_, suffix) => {
+            const getLastCharacterKey = () => {
+                if (typeof this_chid !== 'undefined') {
+                    return getCharaFilename(this_chid);
+                }
+                const context = getContext();
+                for (let i = context.chat.length - 1; i >= 0; i--) {
+                    const message = context.chat[i];
+                    if (message.is_user || message.is_system) {
+                        continue;
+                    } else if (typeof message.original_avatar === 'string') {
+                        return message.original_avatar.replace(/\.[^/.]+$/, '');
+                    }
+                }
+                throw new Error('No usable messages found.');
+            };
+
+            const key = getLastCharacterKey();
+            const value = (extension_settings.sd.character_prompts[key] || '').trim();
+            return value ? value + (suffix || '') : '';
+        });
+}
+
+/**
+ * Generates a prompt using multimodal captioning.
+ * @param {number} generationType - The type of image generation to perform.
+ * @param {string} quietPrompt - The prompt to use for the image generation.
+ */
+async function generateMultimodalPrompt(generationType, quietPrompt) {
+    let avatarUrl;
+
+    if (generationType == generationMode.USER_MULTIMODAL) {
+        avatarUrl = getUserAvatar(user_avatar);
+    }
+
+    if (generationType == generationMode.CHARACTER_MULTIMODAL || generationType === generationMode.FACE_MULTIMODAL) {
+        const context = getContext();
+
+        if (context.groupId) {
+            const groupMembers = context.groups.find(x => x.id === context.groupId)?.members;
+            const lastMessageAvatar = context.chat?.filter(x => !x.is_system && !x.is_user)?.slice(-1)[0]?.original_avatar;
+            const randomMemberAvatar = Array.isArray(groupMembers) ? groupMembers[Math.floor(Math.random() * groupMembers.length)]?.avatar : null;
+            const avatarToUse = lastMessageAvatar || randomMemberAvatar;
+            avatarUrl = formatCharacterAvatar(avatarToUse);
+        } else {
+            avatarUrl = getCharacterAvatar(context.characterId);
+        }
+    }
+
+    try {
+        const response = await fetch(avatarUrl);
+
+        if (!response.ok) {
+            throw new Error('Could not fetch avatar image.');
+        }
+
+        const avatarBlob = await response.blob();
+        const avatarBase64 = await getBase64Async(avatarBlob);
+
+        const caption = await getMultimodalCaption(avatarBase64, quietPrompt);
+
+        if (!caption) {
+            throw new Error('No caption returned from the API.');
+        }
+
+        return caption;
+    } catch (error) {
+        console.error(error);
+        toastr.error('Multimodal captioning failed. Please try again.', 'Image Generation');
+        throw new Error('Multimodal captioning failed.');
+    }
+}
+
+/**
+ * Generates a prompt using the main LLM API.
+ * @param {string} quietPrompt - The prompt to use for the image generation.
+ * @returns {Promise<string>} - A promise that resolves when the prompt generation completes.
+ */
+async function generatePrompt(quietPrompt) {
+    const reply = await generateQuietPrompt(quietPrompt, false, false);
+    const processedReply = processReply(reply);
+
+    if (!processedReply) {
+        toastr.error('Prompt generation produced no text. Make sure you\'re using a valid instruct template and try again', 'Image Generation');
+        throw new Error('Prompt generation failed.');
+    }
+
+    return processedReply;
 }
 
 async function sendGenerationRequest(generationType, prompt, characterName = null, callback) {
-    const prefix = (generationType !== generationMode.BACKGROUND && generationType !== generationMode.FREE)
-        ? combinePrefixes(extension_settings.sd.prompt_prefix, getCharacterPrefix())
-        : extension_settings.sd.prompt_prefix;
+    const noCharPrefix = [generationMode.FREE, generationMode.BACKGROUND, generationMode.USER, generationMode.USER_MULTIMODAL];
+    const prefix = noCharPrefix.includes(generationType)
+        ? extension_settings.sd.prompt_prefix
+        : combinePrefixes(extension_settings.sd.prompt_prefix, getCharacterPrefix());
 
     const prefixedPrompt = combinePrefixes(prefix, prompt, '{prompt}');
+
+    const negativePrompt = noCharPrefix.includes(generationType)
+        ? extension_settings.sd.negative_prompt
+        : combinePrefixes(extension_settings.sd.negative_prompt, getCharacterNegativePrefix());
 
     let result = { format: '', data: '' };
     const currentChatId = getCurrentChatId();
@@ -1393,22 +1921,28 @@ async function sendGenerationRequest(generationType, prompt, characterName = nul
     try {
         switch (extension_settings.sd.source) {
             case sources.extras:
-                result = await generateExtrasImage(prefixedPrompt);
+                result = await generateExtrasImage(prefixedPrompt, negativePrompt);
                 break;
             case sources.horde:
-                result = await generateHordeImage(prefixedPrompt);
+                result = await generateHordeImage(prefixedPrompt, negativePrompt);
                 break;
             case sources.vlad:
-                result = await generateAutoImage(prefixedPrompt);
+                result = await generateAutoImage(prefixedPrompt, negativePrompt);
                 break;
             case sources.auto:
-                result = await generateAutoImage(prefixedPrompt);
+                result = await generateAutoImage(prefixedPrompt, negativePrompt);
                 break;
             case sources.novel:
-                result = await generateNovelImage(prefixedPrompt);
+                result = await generateNovelImage(prefixedPrompt, negativePrompt);
                 break;
             case sources.openai:
                 result = await generateOpenAiImage(prefixedPrompt);
+                break;
+            case sources.comfy:
+                result = await generateComfyImage(prefixedPrompt, negativePrompt);
+                break;
+            case sources.togetherai:
+                result = await generateTogetherAIImage(prefixedPrompt, negativePrompt);
                 break;
         }
 
@@ -1432,13 +1966,37 @@ async function sendGenerationRequest(generationType, prompt, characterName = nul
     callback ? callback(prompt, base64Image, generationType) : sendMessage(prompt, base64Image, generationType);
 }
 
+async function generateTogetherAIImage(prompt, negativePrompt) {
+    const result = await fetch('/api/sd/together/generate', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            prompt: prompt,
+            negative_prompt: negativePrompt,
+            model: extension_settings.sd.model,
+            steps: extension_settings.sd.steps,
+            width: extension_settings.sd.width,
+            height: extension_settings.sd.height,
+        }),
+    });
+
+    if (result.ok) {
+        const data = await result.json();
+        return { format: 'jpg', data: data?.output?.choices?.[0]?.image_base64 };
+    } else {
+        const text = await result.text();
+        throw new Error(text);
+    }
+}
+
 /**
  * Generates an "extras" image using a provided prompt and other settings.
  *
  * @param {string} prompt - The main instruction used to guide the image generation.
+ * @param {string} negativePrompt - The instruction used to restrict the image generation.
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
-async function generateExtrasImage(prompt) {
+async function generateExtrasImage(prompt, negativePrompt) {
     const url = new URL(getApiUrl());
     url.pathname = '/api/image';
     const result = await doExtrasFetch(url, {
@@ -1453,7 +2011,7 @@ async function generateExtrasImage(prompt) {
             scale: extension_settings.sd.scale,
             width: extension_settings.sd.width,
             height: extension_settings.sd.height,
-            negative_prompt: extension_settings.sd.negative_prompt,
+            negative_prompt: negativePrompt,
             restore_faces: !!extension_settings.sd.restore_faces,
             enable_hr: !!extension_settings.sd.enable_hr,
             karras: !!extension_settings.sd.horde_karras,
@@ -1477,9 +2035,10 @@ async function generateExtrasImage(prompt) {
  * Generates a "horde" image using the provided prompt and configuration settings.
  *
  * @param {string} prompt - The main instruction used to guide the image generation.
+ * @param {string} negativePrompt - The instruction used to restrict the image generation.
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
-async function generateHordeImage(prompt) {
+async function generateHordeImage(prompt, negativePrompt) {
     const result = await fetch('/api/horde/generate-image', {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -1490,7 +2049,7 @@ async function generateHordeImage(prompt) {
             scale: extension_settings.sd.scale,
             width: extension_settings.sd.width,
             height: extension_settings.sd.height,
-            negative_prompt: extension_settings.sd.negative_prompt,
+            negative_prompt: negativePrompt,
             model: extension_settings.sd.model,
             nsfw: extension_settings.sd.horde_nsfw,
             restore_faces: !!extension_settings.sd.restore_faces,
@@ -1512,16 +2071,17 @@ async function generateHordeImage(prompt) {
  * Generates an image in SD WebUI API using the provided prompt and configuration settings.
  *
  * @param {string} prompt - The main instruction used to guide the image generation.
+ * @param {string} negativePrompt - The instruction used to restrict the image generation.
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
-async function generateAutoImage(prompt) {
+async function generateAutoImage(prompt, negativePrompt) {
     const result = await fetch('/api/sd/generate', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({
             ...getSdRequestBody(),
             prompt: prompt,
-            negative_prompt: extension_settings.sd.negative_prompt,
+            negative_prompt: negativePrompt,
             sampler_name: extension_settings.sd.sampler,
             steps: extension_settings.sd.steps,
             cfg_scale: extension_settings.sd.scale,
@@ -1554,9 +2114,10 @@ async function generateAutoImage(prompt) {
  * Generates an image in NovelAI API using the provided prompt and configuration settings.
  *
  * @param {string} prompt - The main instruction used to guide the image generation.
+ * @param {string} negativePrompt - The instruction used to restrict the image generation.
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
-async function generateNovelImage(prompt) {
+async function generateNovelImage(prompt, negativePrompt) {
     const { steps, width, height } = getNovelParams();
 
     const result = await fetch('/api/novelai/generate-image', {
@@ -1570,7 +2131,7 @@ async function generateNovelImage(prompt) {
             scale: extension_settings.sd.scale,
             width: width,
             height: height,
-            negative_prompt: extension_settings.sd.negative_prompt,
+            negative_prompt: negativePrompt,
             upscale_ratio: extension_settings.sd.novel_upscale_ratio,
         }),
     });
@@ -1694,6 +2255,190 @@ async function generateOpenAiImage(prompt) {
     }
 }
 
+/**
+ * Generates an image in ComfyUI using the provided prompt and configuration settings.
+ *
+ * @param {string} prompt - The main instruction used to guide the image generation.
+ * @param {string} negativePrompt - The instruction used to restrict the image generation.
+ * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
+ */
+async function generateComfyImage(prompt, negativePrompt) {
+    const placeholders = [
+        'model',
+        'vae',
+        'sampler',
+        'scheduler',
+        'steps',
+        'scale',
+        'width',
+        'height',
+    ];
+
+    const workflowResponse = await fetch('/api/sd/comfy/workflow', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            file_name: extension_settings.sd.comfy_workflow,
+        }),
+    });
+    if (!workflowResponse.ok) {
+        const text = await workflowResponse.text();
+        toastr.error(`Failed to load workflow.\n\n${text}`);
+    }
+    let workflow = (await workflowResponse.json()).replace('"%prompt%"', JSON.stringify(prompt));
+    workflow = (await workflowResponse.json()).replace('"%negative_prompt%"', JSON.stringify(negativePrompt));
+    workflow = workflow.replace('"%seed%"', JSON.stringify(Math.round(Math.random() * Number.MAX_SAFE_INTEGER)));
+    placeholders.forEach(ph => {
+        workflow = workflow.replace(`"%${ph}%"`, JSON.stringify(extension_settings.sd[ph]));
+    });
+    (extension_settings.sd.comfy_placeholders ?? []).forEach(ph => {
+        workflow = workflow.replace(`"%${ph.find}%"`, JSON.stringify(substituteParams(ph.replace)));
+    });
+    console.log(`{
+        "prompt": ${workflow}
+    }`);
+    const promptResult = await fetch('/api/sd/comfy/generate', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            url: extension_settings.sd.comfy_url,
+            prompt: `{
+                "prompt": ${workflow}
+            }`,
+        }),
+    });
+    return { format: 'png', data: await promptResult.text() };
+}
+
+async function onComfyOpenWorkflowEditorClick() {
+    let workflow = await (await fetch('/api/sd/comfy/workflow', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            file_name: extension_settings.sd.comfy_workflow,
+        }),
+    })).json();
+    const editorHtml = $(await $.get('scripts/extensions/stable-diffusion/comfyWorkflowEditor.html'));
+    const popupResult = callPopup(editorHtml, 'confirm', undefined, { okButton: 'Save', wide: true, large: true, rows: 1 });
+    const checkPlaceholders = () => {
+        workflow = $('#sd_comfy_workflow_editor_workflow').val().toString();
+        $('.sd_comfy_workflow_editor_placeholder_list > li[data-placeholder]').each(function (idx) {
+            const key = this.getAttribute('data-placeholder');
+            const found = workflow.search(`"%${key}%"`) != -1;
+            this.classList[found ? 'remove' : 'add']('sd_comfy_workflow_editor_not_found');
+        });
+    };
+    $('#sd_comfy_workflow_editor_name').text(extension_settings.sd.comfy_workflow);
+    $('#sd_comfy_workflow_editor_workflow').val(workflow);
+    const addPlaceholderDom = (placeholder) => {
+        const el = $(`
+            <li class="sd_comfy_workflow_editor_not_found" data-placeholder="${placeholder.find}">
+                <span class="sd_comfy_workflow_editor_custom_remove" title="Remove custom placeholder">⊘</span>
+                <span class="sd_comfy_workflow_editor_custom_final">"%${placeholder.find}%"</span><br>
+                <input placeholder="find" title="find" type="text" class="text_pole sd_comfy_workflow_editor_custom_find" value=""><br>
+                <input placeholder="replace" title="replace" type="text" class="text_pole sd_comfy_workflow_editor_custom_replace">
+            </li>
+        `);
+        $('#sd_comfy_workflow_editor_placeholder_list_custom').append(el);
+        el.find('.sd_comfy_workflow_editor_custom_find').val(placeholder.find);
+        el.find('.sd_comfy_workflow_editor_custom_find').on('input', function() {
+            placeholder.find = this.value;
+            el.find('.sd_comfy_workflow_editor_custom_final').text(`"%${this.value}%"`);
+            el.attr('data-placeholder', `${this.value}`);
+            checkPlaceholders();
+            saveSettingsDebounced();
+        });
+        el.find('.sd_comfy_workflow_editor_custom_replace').val(placeholder.replace);
+        el.find('.sd_comfy_workflow_editor_custom_replace').on('input', function() {
+            placeholder.replace = this.value;
+            saveSettingsDebounced();
+        });
+        el.find('.sd_comfy_workflow_editor_custom_remove').on('click', () => {
+            el.remove();
+            extension_settings.sd.comfy_placeholders.splice(extension_settings.sd.comfy_placeholders.indexOf(placeholder));
+            saveSettingsDebounced();
+        });
+    };
+    $('#sd_comfy_workflow_editor_placeholder_add').on('click', () => {
+        if (!extension_settings.sd.comfy_placeholders) {
+            extension_settings.sd.comfy_placeholders = [];
+        }
+        const placeholder = {
+            find: '',
+            replace: '',
+        };
+        extension_settings.sd.comfy_placeholders.push(placeholder);
+        addPlaceholderDom(placeholder);
+        saveSettingsDebounced();
+    });
+    (extension_settings.sd.comfy_placeholders ?? []).forEach(placeholder=>{
+        addPlaceholderDom(placeholder);
+    });
+    checkPlaceholders();
+    $('#sd_comfy_workflow_editor_workflow').on('input', checkPlaceholders);
+    if (await popupResult) {
+        const response = await fetch('/api/sd/comfy/save-workflow', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                file_name: extension_settings.sd.comfy_workflow,
+                workflow: $('#sd_comfy_workflow_editor_workflow').val().toString(),
+            }),
+        });
+        if (!response.ok) {
+            const text = await response.text();
+            toastr.error(`Failed to save workflow.\n\n${text}`);
+        }
+    }
+}
+
+async function onComfyNewWorkflowClick() {
+    let name = await callPopup('<h3>Workflow name:</h3>', 'input');
+    if (!name) {
+        return;
+    }
+    if (!name.toLowerCase().endsWith('.json')) {
+        name += '.json';
+    }
+    extension_settings.sd.comfy_workflow = name;
+    const response = await fetch('/api/sd/comfy/save-workflow', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            file_name: extension_settings.sd.comfy_workflow,
+            workflow: '',
+        }),
+    });
+    if (!response.ok) {
+        const text = await response.text();
+        toastr.error(`Failed to save workflow.\n\n${text}`);
+    }
+    saveSettingsDebounced();
+    await loadComfyWorkflows();
+    await delay(200);
+    await onComfyOpenWorkflowEditorClick();
+}
+
+async function onComfyDeleteWorkflowClick() {
+    const confirm = await callPopup('Delete the workflow? This action is irreversible.', 'confirm');
+    if (!confirm) {
+        return;
+    }
+    const response = await fetch('/api/sd/comfy/delete-workflow', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            file_name: extension_settings.sd.comfy_workflow,
+        }),
+    });
+    if (!response.ok) {
+        const text = await response.text();
+        toastr.error(`Failed to save workflow.\n\n${text}`);
+    }
+    await loadComfyWorkflows();
+    onComfyWorkflowChange();
+}
+
 async function sendMessage(prompt, image, generationType) {
     const context = getContext();
     const messageText = `[${context.name2} sends a picture that contains: ${prompt}]`;
@@ -1725,7 +2470,7 @@ function addSDGenButtons() {
 
     const waitButtonHtml = `
         <div id="sd_gen_wait" class="fa-solid fa-hourglass-half" /></div>
-    `
+    `;
     const dropdownHtml = `
     <div id="sd_dropdown">
         <ul class="list-group">
@@ -1746,7 +2491,7 @@ function addSDGenButtons() {
 
     const messageButton = $('.sd_message_gen');
     const button = $('#sd_gen');
-    const waitButton = $("#sd_gen_wait");
+    const waitButton = $('#sd_gen_wait');
     const dropdown = $('#sd_dropdown');
     waitButton.hide();
     dropdown.hide();
@@ -1762,7 +2507,7 @@ function addSDGenButtons() {
     $(document).on('click touchend', function (e) {
         const target = $(e.target);
         if (target.is(dropdown)) return;
-        if (target.is(button) && !dropdown.is(":visible") && $("#send_but").is(":visible")) {
+        if (target.is(button) && !dropdown.is(':visible') && $('#send_but').is(':visible')) {
             e.preventDefault();
 
             dropdown.fadeIn(animation_duration);
@@ -1787,6 +2532,10 @@ function isValidState() {
             return secret_state[SECRET_KEYS.NOVEL];
         case sources.openai:
             return secret_state[SECRET_KEYS.OPENAI];
+        case sources.comfy:
+            return true;
+        case sources.togetherai:
+            return secret_state[SECRET_KEYS.TOGETHERAI];
     }
 }
 
@@ -1816,7 +2565,6 @@ async function sdMessageButton(e) {
     const $mes = $icon.closest('.mes');
     const message_id = $mes.attr('mesid');
     const message = context.chat[message_id];
-    const characterName = message?.name || context.name2;
     const characterFileName = context.characterId ? context.characters[context.characterId].name : context.groups[Object.keys(context.groups).filter(x => context.groups[x].id === context.groupId)[0]]?.id?.toString();
     const messageText = message?.mes;
     const hasSavedImage = message?.extra?.image && message?.extra?.title;
@@ -1840,8 +2588,8 @@ async function sdMessageButton(e) {
             await sendGenerationRequest(generationType, prompt, characterFileName, saveGeneratedImage);
         }
         else {
-            console.log("doing /sd raw last");
-            await generatePicture('sd', 'raw_last', `${characterName} said: ${messageText}`, saveGeneratedImage);
+            console.log('doing /sd raw last');
+            await generatePicture('sd', 'raw_last', messageText, saveGeneratedImage);
         }
     }
     catch (error) {
@@ -1870,37 +2618,41 @@ async function sdMessageButton(e) {
 
         context.saveChat();
     }
-};
+}
 
-$("#sd_dropdown [id]").on("click", function () {
-    const id = $(this).attr("id");
+$('#sd_dropdown [id]').on('click', function () {
+    const id = $(this).attr('id');
     const idParamMap = {
-        "sd_you": "you",
-        "sd_face": "face",
-        "sd_me": "me",
-        "sd_world": "scene",
-        "sd_last": "last",
-        "sd_raw_last": "raw_last",
-        "sd_background": "background"
+        'sd_you': 'you',
+        'sd_face': 'face',
+        'sd_me': 'me',
+        'sd_world': 'scene',
+        'sd_last': 'last',
+        'sd_raw_last': 'raw_last',
+        'sd_background': 'background',
     };
 
     const param = idParamMap[id];
 
     if (param) {
-        console.log("doing /sd " + param)
+        console.log('doing /sd ' + param);
         generatePicture('sd', param);
     }
 });
 
 jQuery(async () => {
-    getContext().registerSlashCommand('imagine', generatePicture, ['sd', 'img', 'image'], helpString, true, true);
+    registerSlashCommand('imagine', generatePicture, ['sd', 'img', 'image'], helpString, true, true);
+    registerSlashCommand('imagine-comfy-workflow', changeComfyWorkflow, ['icw'], '(workflowName) - change the workflow to be used for image generation with ComfyUI, e.g. <tt>/imagine-comfy-workflow MyWorkflow</tt>')
 
     $('#extensions_settings').append(renderExtensionTemplate('stable-diffusion', 'settings', defaultSettings));
     $('#sd_source').on('change', onSourceChange);
     $('#sd_scale').on('input', onScaleInput);
     $('#sd_steps').on('input', onStepsInput);
     $('#sd_model').on('change', onModelChange);
+    $('#sd_vae').on('change', onVaeChange);
     $('#sd_sampler').on('change', onSamplerChange);
+    $('#sd_resolution').on('change', onResolutionChange);
+    $('#sd_scheduler').on('change', onSchedulerChange);
     $('#sd_prompt_prefix').on('input', onPromptPrefixInput);
     $('#sd_negative_prompt').on('input', onNegativePromptInput);
     $('#sd_width').on('input', onWidthInput);
@@ -1912,6 +2664,7 @@ jQuery(async () => {
     $('#sd_enable_hr').on('input', onHighResFixInput);
     $('#sd_refine_mode').on('input', onRefineModeInput);
     $('#sd_character_prompt').on('input', onCharacterPromptInput);
+    $('#sd_character_negative_prompt').on('input', onCharacterNegativePromptInput);
     $('#sd_auto_validate').on('click', validateAutoUrl);
     $('#sd_auto_url').on('input', onAutoUrlInput);
     $('#sd_auto_auth').on('input', onAutoAuthInput);
@@ -1925,6 +2678,12 @@ jQuery(async () => {
     $('#sd_novel_upscale_ratio').on('input', onNovelUpscaleRatioInput);
     $('#sd_novel_anlas_guard').on('input', onNovelAnlasGuardInput);
     $('#sd_novel_view_anlas').on('click', onViewAnlasClick);
+    $('#sd_comfy_validate').on('click', validateComfyUrl);
+    $('#sd_comfy_url').on('input', onComfyUrlInput);
+    $('#sd_comfy_workflow').on('change', onComfyWorkflowChange);
+    $('#sd_comfy_open_workflow_editor').on('click', onComfyOpenWorkflowEditorClick);
+    $('#sd_comfy_new_workflow').on('click', onComfyNewWorkflowClick);
+    $('#sd_comfy_delete_workflow').on('click', onComfyDeleteWorkflowClick);
     $('#sd_expand').on('input', onExpandInput);
     $('#sd_style').on('change', onStyleSelect);
     $('#sd_save_style').on('click', onSaveStyleClick);
@@ -1932,15 +2691,24 @@ jQuery(async () => {
     $('#sd_interactive_mode').on('input', onInteractiveModeInput);
     $('#sd_openai_style').on('change', onOpenAiStyleSelect);
     $('#sd_openai_quality').on('change', onOpenAiQualitySelect);
+    $('#sd_multimodal_captioning').on('input', onMultimodalCaptioningInput);
 
     $('.sd_settings .inline-drawer-toggle').on('click', function () {
-        initScrollHeight($("#sd_prompt_prefix"));
-        initScrollHeight($("#sd_negative_prompt"));
-        initScrollHeight($("#sd_character_prompt"));
-    })
+        initScrollHeight($('#sd_prompt_prefix'));
+        initScrollHeight($('#sd_negative_prompt'));
+        initScrollHeight($('#sd_character_prompt'));
+        initScrollHeight($('#sd_character_negative_prompt'));
+    });
+
+    for (const [key, value] of Object.entries(resolutionOptions)) {
+        const option = document.createElement('option');
+        option.value = key;
+        option.text = value.name;
+        $('#sd_resolution').append(option);
+    }
 
     eventSource.on(event_types.EXTRAS_CONNECTED, async () => {
-        await Promise.all([loadSamplers(), loadModels()]);
+        await loadSettingOptions();
     });
 
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
